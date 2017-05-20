@@ -2584,206 +2584,241 @@ private function readFileContents pFilename
   end if
 end readFileContents
 
+## YAMLToArray by Monte Goulding
 
-#**********************
-Basic YAML support until an LCB extension is written.
-#***********************
-/*
-Array-to-Yaml and Yaml-to-Array library
-Mark Wieder 2016
-wtf licenced : have fun
+constant kMultiLineModeNone = 0
+constant kMultiLineModeLiteral = 1
+constant kMultiLineModeFolded = 2
 
-Public functions here:
-arrayToYaml
-yamlToArray
-*/
+command YAMLToArray pYaml
+   local tInDocument = true
+   local tPath
+   local tArray
+   local tPathLists
+   local tReferences
+   local tMultiLineMode
+   put kMultiLineModeNone into tMultiLineMode
 
--- allow 4 spaces per indentation in output yaml files
--- adjust as desired
-constant kIndent = 4
+   local tMultiLine
+   repeat for each line tLine in pYaml
+      -- ignore directives
+      if tLine begins with "%" then
+         next repeat
+      end if
 
-/*
-arrayToYaml
+      if tLine begins with "---" then
+         put true into tInDocument
+         next repeat
+      end if
 
-Convert a LiveCode array to yaml format
+      if not tInDocument then
+         next repeat
+      end if
 
-@pArray : the array to convert
-@pIndentLevel : initially empty, recursion sets this
-*/
-private function arrayToYaml pArray, pIndentLevel
-  local tYaml
-  local tIndentLevel
+      if tLine begins with "..." then
+         if tMultiLineMode is not kMultiLineModeNone then
+            __ClearQuotes tMultiLine
+            put tMultiLine into tArray[tPath]
+            put kMultiLineModeNone into tMultiLineMode
+         end if
+         put false into tInDocument
+         next repeat
+      end if
 
-  put pIndentLevel into tIndentLevel
-  if tIndentLevel is empty then
-    put kIndent into tIndentLevel
-    put "ArrayName :" & cr into tYaml
-  end if
-  if pArray is an array then
-    repeat for each key tKey in pArray
-      if pArray[tKey] is an array then
-        put indent(tIndentLevel) & tKey && ":" && pArray[tKey] & cr after tYaml
-        add kIndent to tIndentLevel
-        -- recurse to work through multidimensional arrays
-        put arrayToYaml(pArray[tKey], tIndentLevel) after tYaml
-        subtract kIndent from tIndentLevel
+      local tPathElement, tListItem
+      put __PathElement(tLine, tListItem, tPathLists) into tPathElement
+
+      -- comment lines
+      split tLine by "#"
+      put tLine[1] into tLine
+
+      -- remain in multiline until indent is lower
+      if tMultiLineMode is not kMultiLineModeNone then
+         if tPathElement < the number of elements of tPath + 1 and tLine is not empty then
+            __ClearQuotes tMultiLine
+            put tMultiLine into tArray[tPath]
+            put kMultiLineModeNone into tMultiLineMode
+         else
+            -- add back any stripped literal indents
+            if tPathElement > the number of elements of tPath + 1 then
+               repeat for tPathElement - (the number of elements of tPath + 1)
+                  put "    " before tLine
+               end repeat
+            end if
+
+            -- empty lines and indented lines are literal even in folded mode
+            if tMultiLineMode is kMultiLineModeLiteral then
+               if tMultiLine is not empty then
+                  put return after tMultiLine
+               end if
+               put tLine after tMultiLine
+            else
+               if tLine is empty then
+                  put return after tMultiLine
+               else if char 1 of tLine is space or \
+                     the last line of tMultiLine is empty or \
+                     the last line of tMultiLine begins with space then
+                  if tMultiLine is not empty then
+                     put return after tMultiLine
+                  end if
+                  put tLine after tMultiLine
+               else
+                  if tMultiLine is not empty then
+                     put space after tMultiLine
+                  end if
+                  put tLine after tMultiLine
+               end if
+            end if
+
+            next repeat
+         end if
+      end if
+
+      -- empty lines
+      if tLine is empty then
+         next repeat
+      end if
+
+      local tElements
+      put the number of elements of tPath into tElements
+      if tPathLists[tPathElement] and \
+            tListItem and \
+            tPath[tPathElement] is an integer then
+         add 1 to tPath[tPathElement]
+         repeat with tIndex = tElements down to tPathElement + 1
+            delete variable tPath[tIndex]
+            delete variable tPathLists[tIndex]
+         end repeat
+         add 1 to tPathElement
       else
-        put indent(tIndentLevel) & tKey && ":" && pArray[tKey] & cr after tYaml
-      end if
-    end repeat
-  else
-    throw "not an array"
-  end if
-  return tYaml
-end arrayToYaml
+         if tPathElement < tElements then
+            repeat with tIndex = tElements down to tPathElement + 1
+               delete variable tPath[tIndex]
+               delete variable tPathLists[tIndex]
+            end repeat
+         else if tPathElement > tElements + 1 then
+            return "invalid YAML" for error
+         end if
 
-/*
-indent
-
-Used internally by arrayToYaml
-*/
-private function indent pIndentLevel
-  local tIndentLevel
-
-  -- return the proper number of spaces for indentation
-  repeat pIndentLevel times
-    put space after tIndentLevel
-  end repeat
-  return tIndentLevel
-end indent
-
-/*
-indentationLevel
-
-Return the indentation level of the supplied line
-NOTE: changes the input line in situ to remove the indentation
-Used internally by yamlToArray
-*/
-private function indentationLevel @pLine
-  local tIndentationLevel
-  local tKey, tValue
-
-  put 0 into tIndentationLevel
-  repeat while char 1 of pLine is space
-    add 1 to tIndentationLevel
-    delete char 1 of pLine
-  end repeat
-  return tIndentationLevel
-end indentationLevel
-
-/*
-yamlToArray
-
-Convert yaml format text to a LiveCode array
-*/
-private function yamlToArray pYaml
-  local tArray, tDelOffset
-  local tIndentation, tPrevIndent
-  local tWorkingLine
-  local tYamlHeading
-  local tKey, tValue
-  local tSpacesPerIndent
-
-  repeat for each line tLine in pYaml
-    put empty into tKey
-
-    put tLine into tWorkingLine
-    if word 1 to -1 of tWorkingLine is empty then next repeat
-
-    # Support keys wrapped in quotes
-    put offset(":", tWorkingLine) into tDelOffset
-    if tDelOffset > 1 then
-      local tStartQuoteCharOffset, tEndQuoteCharOffset
-
-      put offset(quote, tWorkingLine) into tStartQuoteCharOffset
-      if tStartQuoteCharOffset < tDelOffset then
-        put offset(quote, tWorkingLine, tDelOffset) into tEndQuoteCharOffset
-        if tEndQuoteCharOffset > 0 then
-          add tDelOffset to tEndQuoteCharOffset
-          put char 1 to tEndQuoteCharOffset of tWorkingLine into tKey
-          delete the last char of tKey
-          delete char tStartQuoteCharOffset of tKey
-          put char tEndQuoteCharOffset + 1 to -1 of tWorkingLine into tValue
-          repeat while char 1 of tValue is in ": "
-            delete char 1 of tValue
-          end repeat
-          put word 1 to -1 of tValue into tValue
-        end if
-      end if
-    end if
-
-    if tKey is empty then
-      set the itemdelimiter to ":"
-      put item 1 of tWorkingLine into tKey
-      repeat while char -1 of tKey is in ": "
-        delete char -1 of tKey
-      end repeat
-      put word 1 to -1 of item 2 to -1 of tWorkingLine into tValue
-    end if
-
-    put indentationLevel(tKey) into tIndentation
-    set the itemdelimiter to ","
-    if tPrevIndent is empty then
-      -- first time through
-      put tIndentation into tPrevIndent
-      put tKey into tYamlHeading
-      put tValue into tArray[tYamlHeading]
-    else
-      -- When indentation decreases we need to guess how many levels down the user is going.
-      -- Otherwise nested arrays won't work very well.
-      if tSpacesPerIndent is empty AND tPrevIndent is 0 and tIndentation > 0 then
-        put tIndentation into tSpacesPerIndent
+         put tListItem into tPathLists[tPathElement]
+         if tListItem then
+            put 1 into tPath[tPathElement]
+            add 1 to tPathElement
+         end if
       end if
 
-      switch
-        case tIndentation < tPrevIndent
-          -- remove the array indexes depending on change in hierarchy
-          repeat with i = (tPrevIndent/tSpacesPerIndent) down to (tIndentation/tSpacesPerIndent)
-            RemoveLastIndexFrom tYamlHeading
-          end repeat
-          put tIndentation into tPrevIndent
-          yamlAddToArray tArray, tYamlHeading, tKey, tValue
-          put tKey into item (the number of items of tYamlHeading + 1) of tYamlHeading
-          break
-        case tIndentation is tPrevIndent
-          RemoveLastIndexFrom tYamlHeading
-          yamlAddToArray tArray, tYamlHeading, tKey, tValue
-          put tKey into item (the number of items of tYamlHeading + 1) of tYamlHeading
-          break
-        case tIndentation > tPrevIndent
-          -- add an array index
-          yamlAddToArray tArray, tYamlHeading, tKey, tValue
-          put tKey into item (the number of items of tYamlHeading + 1) of tYamlHeading
-          put tIndentation into tPrevIndent
-          break
-      end switch
-    end if
-  end repeat
-  return tArray
-end yamlToArray
+      -- handle line with just list marker
+      if the number of words of tLine is 0 then
+         next repeat
+      end if
 
-private command yamlAddToArray @xArray, pYamlHeading, pKey, pValue
-  if pYamlHeading is empty then
-    do "put pValue into xArray[" & quote & pKey & quote & "]"
-  else
-    do "put pValue into xArray" & yamlPathToArrayPath(pYamlHeading) & "[" & quote & pKey & quote & "]"
-  end if
-end yamlAddToArray
+      -- map
+      if tLine contains ":" then
+         set the itemDelimiter to ":"
+         local tKey
+         put item 1 of tLine into tKey
+         delete item 1 of tLine
+         __ClearQuotes tKey
 
-private command RemoveLastIndexFrom @pIndexString
-  set the itemdelimiter to comma
-  delete item -1 of pIndexString
-end RemoveLastIndexFrom
+         if tKey is empty then
+            return "invalid YAML" for error
+         end if
 
-private function yamlPathToArrayPath pYamlPath
-  local tArrayPath
+         put false into tPathLists[tPathElement]
+         put tKey into tPath[tPathElement]
 
-  set the itemdelimiter to comma
-  repeat for each item tPath in pYamlPath
-    put "[" & quote & tPath & quote & "]" after tArrayPath
-  end repeat
-  return tArrayPath
-end yamlPathToArrayPath
+         -- clean whitespace
+         put word 1 to -1 of tLine into tLine
+
+         if tLine is not empty then
+            -- referenced element
+            local tRef
+            if tLine begins with "&" then
+               put word 1 of tLine into tRef
+               put "*" into char 1 of tRef
+               delete word 1 of tLine
+            else
+               put empty into tRef
+            end if
+
+            -- check for referenced element
+            if word 1 of tLine is among the keys of tReferences then
+               put tArray[tReferences[word 1 of tLine]] into tLine
+            end if
+
+            -- store referenced element
+            if tRef is not empty then
+               put tPath into tReferences[tRef]
+            end if
+
+            -- ignore explicit typing
+            if tLine begins with "!" then
+               delete word 1 of tLine
+            end if
+
+            if tLine is "|" then
+               put kMultiLineModeLiteral into tMultiLineMode
+               put empty into tMultiLine
+            else if tLine is ">" then
+               put kMultiLineModeFolded into tMultiLineMode
+               put empty into tMultiLine
+            else
+               __ClearQuotes tLine
+               put tLine into tArray[tPath]
+            end if
+         end if
+
+      else
+         put word 1 to -1 of tLine into tArray[tPath]
+      end if
+   end repeat
+
+   if tMultiLineMode is not kMultiLineModeNone then
+      __ClearQuotes tMultiLine
+      put tMultiLine into tArray[tPath]
+   end if
+
+   return tArray for value
+end YAMLToArray
+
+private command __ClearQuotes @xLine
+   if xLine begins with quote and xLine ends with quote then
+      put format( char 2 to -2 of xLine) into xLine
+   else if xLine begins with "'" and xLine ends with "'" then
+      put char 2 to -2 of xLine into xLine
+   end if
+end __ClearQuotes
+
+private function __PathElement @xLine, @rListItem, pPathLists
+   local tPathElement = 1
+
+   if xLine begins with "- " then
+      put true into rListItem
+      delete char 1 to 2 of xLine
+      return tPathElement
+   end if
+
+   put false into rListItem
+   repeat
+      if xLine begins with "    " then
+         add 1 to tPathElement
+         if pPathLists[tPathElement] then
+            add 1 to tPathElement
+         end if
+      else if xLine begins with "  - " then
+         -- list
+         add 1 to tPathElement
+         put true into rListItem
+      else
+         if xLine begins with "  " then
+            add 1 to tPathElement
+            delete char 1 to 2 of xLine
+         end if
+         return tPathElement
+      end if
+      delete char 1 to 4 of xLine
+   end repeat
+end __PathElement
 
 
 private function _printArray pArray, pDimension, pFullData
