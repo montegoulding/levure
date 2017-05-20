@@ -2555,7 +2555,12 @@ function yamlFileToArray pFilename
   put the result into tError
 
   if tError is empty then
-    return yamlToArray(textDecode(tYaml, "utf8")) for value
+    YAMLToArray textDecode(tYaml, "utf8")
+    if the result is not empty then
+      return the result for error
+    else
+      return it for value
+    end if
   else
     return tError for error
   end if
